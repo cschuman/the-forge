@@ -139,9 +139,16 @@ func runInteractive(analysis *analyzer.Analysis, set *suggestions.SuggestionSet)
 		fmt.Printf("\n%sFound %d high-impact improvements ready to forge:%s\n\n", Bold, len(highImpact), Reset)
 
 		for i, s := range highImpact {
-			fmt.Printf("  %s[%d]%s %s%s%s\n", Cyan, i+1, Reset, Bold, s.Name, Reset)
-			fmt.Printf("      %s%s%s\n", Dim, s.Description, Reset)
-			fmt.Printf("      %s%s%s\n\n", Dim, truncate(s.Command, 60), Reset)
+			typeLabel := "alias"
+			usage := s.Name
+			if s.Type == suggestions.TypeFunction {
+				typeLabel = "function"
+				usage = getFunctionUsage(s.Name)
+			}
+
+			fmt.Printf("  %s[%d]%s %s%s%s %s(%s)%s\n", Cyan, i+1, Reset, Bold, s.Name, Reset, Dim, typeLabel, Reset)
+			fmt.Printf("      %sUsage:%s %s\n", Dim, Reset, usage)
+			fmt.Printf("      %s%s%s\n\n", Dim, s.Description, Reset)
 		}
 
 		fmt.Printf("Add these to %s%s%s? %s[Y/n]%s ", Cyan, rcPath, Reset, Dim, Reset)
@@ -296,4 +303,15 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max-3] + "..."
+}
+
+func getFunctionUsage(name string) string {
+	switch name {
+	case "killport":
+		return "killport 8080"
+	case "cl":
+		return "cl ~/Projects"
+	default:
+		return name + " <args>"
+	}
 }

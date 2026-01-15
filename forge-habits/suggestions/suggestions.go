@@ -47,17 +47,13 @@ type SuggestionSet struct {
 // Generate creates actionable suggestions from analysis
 func Generate(analysis *analyzer.Analysis) *SuggestionSet {
 	set := &SuggestionSet{}
+	seen := make(map[string]bool) // Track by name to avoid duplicates
 
-	// Process alias candidates
-	for _, ac := range analysis.AliasCandidates {
-		if ac.Count < 3 {
-			continue
+	addSuggestion := func(s *Suggestion) {
+		if s == nil || seen[s.Name] {
+			return
 		}
-
-		s := createAliasSuggestion(ac.Command, ac.Count)
-		if s == nil {
-			continue
-		}
+		seen[s.Name] = true
 
 		if s.Confidence == ConfHigh {
 			set.HighImpact = append(set.HighImpact, *s)
@@ -66,22 +62,38 @@ func Generate(analysis *analyzer.Analysis) *SuggestionSet {
 		}
 	}
 
-	// Process pipeline commands (script candidates)
+	// Process pipeline commands first (these often become functions)
+	// Aggregate counts for similar patterns
+	killportCount := 0
+	for _, pc := range analysis.PipelineCommands {
+		if strings.Contains(pc.Command, "lsof -ti:") && strings.Contains(pc.Command, "xargs kill") {
+			killportCount += pc.Count
+		}
+	}
+	if killportCount >= 5 {
+		addSuggestion(createKillportFunction(killportCount))
+	}
+
+	// Process other pipelines
 	for _, pc := range analysis.PipelineCommands {
 		if pc.Count < 5 {
 			continue
 		}
-
-		s := createFunctionSuggestion(pc.Command, pc.Count)
-		if s == nil {
+		// Skip killport patterns - already handled
+		if strings.Contains(pc.Command, "lsof -ti:") && strings.Contains(pc.Command, "xargs kill") {
 			continue
 		}
 
-		if s.Confidence == ConfHigh {
-			set.HighImpact = append(set.HighImpact, *s)
-		} else {
-			set.Review = append(set.Review, *s)
+		addSuggestion(createFunctionSuggestion(pc.Command, pc.Count))
+	}
+
+	// Process alias candidates
+	for _, ac := range analysis.AliasCandidates {
+		if ac.Count < 3 {
+			continue
 		}
+
+		addSuggestion(createAliasSuggestion(ac.Command, ac.Count))
 	}
 
 	// Process command sequences
@@ -90,22 +102,31 @@ func Generate(analysis *analyzer.Analysis) *SuggestionSet {
 			continue
 		}
 
-		s := createSequenceSuggestion(seq)
-		if s == nil {
-			continue
-		}
-
-		if s.Confidence == ConfHigh {
-			set.HighImpact = append(set.HighImpact, *s)
-		} else {
-			set.Review = append(set.Review, *s)
-		}
+		addSuggestion(createSequenceSuggestion(seq))
 	}
 
 	// Add tips
 	set.Tips = generateTips(analysis)
 
 	return set
+}
+
+func createKillportFunction(totalCount int) *Suggestion {
+	return &Suggestion{
+		Type:    TypeFunction,
+		Name:    "killport",
+		Command: "lsof -ti:<port> | xargs kill -9",
+		Code: `killport() {
+    if [ -z "$1" ]; then
+        echo "Usage: killport <port>"
+        return 1
+    fi
+    lsof -ti:"$1" | xargs kill -9 2>/dev/null && echo "Killed process on port $1" || echo "No process on port $1"
+}`,
+		Description: fmt.Sprintf("Kill process on any port - pattern used %d times", totalCount),
+		Impact:      totalCount,
+		Confidence:  ConfHigh,
+	}
 }
 
 func createAliasSuggestion(cmd string, count int) *Suggestion {
@@ -136,25 +157,6 @@ func createAliasSuggestion(cmd string, count int) *Suggestion {
 }
 
 func createFunctionSuggestion(cmd string, count int) *Suggestion {
-	// Detect killport pattern: lsof -ti:PORT | xargs kill -9
-	if strings.Contains(cmd, "lsof -ti:") && strings.Contains(cmd, "xargs kill") {
-		return &Suggestion{
-			Type:    TypeFunction,
-			Name:    "killport",
-			Command: cmd,
-			Code: `killport() {
-    if [ -z "$1" ]; then
-        echo "Usage: killport <port>"
-        return 1
-    fi
-    lsof -ti:"$1" | xargs kill -9 2>/dev/null && echo "Killed process on port $1" || echo "No process on port $1"
-}`,
-			Description: fmt.Sprintf("Kill process on port - used %d times", count),
-			Impact:      count,
-			Confidence:  ConfHigh,
-		}
-	}
-
 	// Detect pwd | pbcopy pattern
 	if strings.TrimSpace(cmd) == "pwd | pbcopy" {
 		return &Suggestion{
@@ -162,7 +164,7 @@ func createFunctionSuggestion(cmd string, count int) *Suggestion {
 			Name:        "cpwd",
 			Command:     cmd,
 			Code:        "alias cpwd='pwd | pbcopy'",
-			Description: fmt.Sprintf("Copy current path - used %d times", count),
+			Description: fmt.Sprintf("Copy current path to clipboard - used %d times", count),
 			Impact:      count,
 			Confidence:  ConfHigh,
 		}
