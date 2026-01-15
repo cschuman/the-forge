@@ -1,11 +1,12 @@
 package suggestions
 
 import (
+	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"forge-habits/analyzer"
+	"forge-habits/llm"
 )
 
 // Confidence levels
@@ -30,7 +31,8 @@ const (
 type Suggestion struct {
 	Type        SuggestionType
 	Name        string // alias/function name
-	Command     string // original command
+	Usage       string // how to use it (e.g., "killport 8080")
+	Command     string // original command pattern
 	Code        string // the alias/function code to add
 	Description string // human-readable explanation
 	Impact      int    // usage count - how many times this was typed
@@ -44,10 +46,78 @@ type SuggestionSet struct {
 	Tips       []Suggestion // Just informational
 }
 
-// Generate creates actionable suggestions from analysis
-func Generate(analysis *analyzer.Analysis) *SuggestionSet {
+// Generate creates actionable suggestions from analysis using LLM
+func Generate(analysis *analyzer.Analysis, client *llm.Client) *SuggestionSet {
 	set := &SuggestionSet{}
-	seen := make(map[string]bool) // Track by name to avoid duplicates
+
+	// Collect patterns worth analyzing
+	var patterns []PatternInput
+
+	// Long commands used repeatedly
+	for _, ac := range analysis.AliasCandidates {
+		if ac.Count >= 5 {
+			patterns = append(patterns, PatternInput{
+				Command: ac.Command,
+				Count:   ac.Count,
+				Type:    "repeated_command",
+			})
+		}
+	}
+
+	// Pipeline commands
+	for _, pc := range analysis.PipelineCommands {
+		if pc.Count >= 3 {
+			patterns = append(patterns, PatternInput{
+				Command: pc.Command,
+				Count:   pc.Count,
+				Type:    "pipeline",
+			})
+		}
+	}
+
+	// Command sequences
+	for _, seq := range analysis.CommandSequences {
+		if seq.Count >= 30 {
+			patterns = append(patterns, PatternInput{
+				Command: fmt.Sprintf("%s → %s", seq.From, seq.To),
+				Count:   seq.Count,
+				Type:    "sequence",
+			})
+		}
+	}
+
+	if len(patterns) == 0 {
+		return set
+	}
+
+	// Ask LLM to analyze patterns
+	suggestions := analyzePatternsWithLLM(patterns, client)
+
+	// Categorize by confidence
+	seen := make(map[string]bool)
+	for _, s := range suggestions {
+		if seen[s.Name] {
+			continue
+		}
+		seen[s.Name] = true
+
+		if s.Confidence == ConfHigh {
+			set.HighImpact = append(set.HighImpact, s)
+		} else if s.Confidence == ConfMedium {
+			set.Review = append(set.Review, s)
+		}
+	}
+
+	// Add tips
+	set.Tips = generateTips(analysis)
+
+	return set
+}
+
+// GenerateWithoutLLM creates suggestions using heuristics only
+func GenerateWithoutLLM(analysis *analyzer.Analysis) *SuggestionSet {
+	set := &SuggestionSet{}
+	seen := make(map[string]bool)
 
 	addSuggestion := func(s *Suggestion) {
 		if s == nil || seen[s.Name] {
@@ -62,232 +132,239 @@ func Generate(analysis *analyzer.Analysis) *SuggestionSet {
 		}
 	}
 
-	// Process pipeline commands first (these often become functions)
-	// Aggregate counts for similar patterns
-	killportCount := 0
-	for _, pc := range analysis.PipelineCommands {
-		if strings.Contains(pc.Command, "lsof -ti:") && strings.Contains(pc.Command, "xargs kill") {
-			killportCount += pc.Count
-		}
-	}
-	if killportCount >= 5 {
-		addSuggestion(createKillportFunction(killportCount))
-	}
-
-	// Process other pipelines
+	// Simple heuristics for common patterns
 	for _, pc := range analysis.PipelineCommands {
 		if pc.Count < 5 {
 			continue
 		}
-		// Skip killport patterns - already handled
-		if strings.Contains(pc.Command, "lsof -ti:") && strings.Contains(pc.Command, "xargs kill") {
-			continue
-		}
-
-		addSuggestion(createFunctionSuggestion(pc.Command, pc.Count))
+		s := createSimpleSuggestion(pc.Command, pc.Count)
+		addSuggestion(s)
 	}
 
-	// Process alias candidates
 	for _, ac := range analysis.AliasCandidates {
-		if ac.Count < 3 {
+		if ac.Count < 5 {
 			continue
 		}
-
-		addSuggestion(createAliasSuggestion(ac.Command, ac.Count))
+		s := createSimpleSuggestion(ac.Command, ac.Count)
+		addSuggestion(s)
 	}
 
-	// Process command sequences
-	for _, seq := range analysis.CommandSequences {
-		if seq.Count < 50 {
-			continue
-		}
-
-		addSuggestion(createSequenceSuggestion(seq))
-	}
-
-	// Add tips
 	set.Tips = generateTips(analysis)
-
 	return set
 }
 
-func createKillportFunction(totalCount int) *Suggestion {
-	return &Suggestion{
-		Type:    TypeFunction,
-		Name:    "killport",
-		Command: "lsof -ti:<port> | xargs kill -9",
-		Code: `killport() {
-    if [ -z "$1" ]; then
-        echo "Usage: killport <port>"
-        return 1
-    fi
-    lsof -ti:"$1" | xargs kill -9 2>/dev/null && echo "Killed process on port $1" || echo "No process on port $1"
-}`,
-		Description: fmt.Sprintf("Kill process on any port - pattern used %d times", totalCount),
-		Impact:      totalCount,
-		Confidence:  ConfHigh,
-	}
+type PatternInput struct {
+	Command string `json:"command"`
+	Count   int    `json:"count"`
+	Type    string `json:"type"`
 }
 
-func createAliasSuggestion(cmd string, count int) *Suggestion {
-	name := suggestAliasName(cmd)
+type LLMSuggestion struct {
+	Name        string `json:"name"`
+	Type        string `json:"type"` // "alias" or "function"
+	Usage       string `json:"usage"`
+	Code        string `json:"code"`
+	Description string `json:"description"`
+	Confidence  string `json:"confidence"` // "high", "medium", "low"
+	Pattern     string `json:"pattern"`    // which input pattern this addresses
+}
+
+func analyzePatternsWithLLM(patterns []PatternInput, client *llm.Client) []Suggestion {
+	prompt := buildAnalysisPrompt(patterns)
+
+	response, err := client.Generate(prompt)
+	if err != nil {
+		// Fall back to simple heuristics
+		return nil
+	}
+
+	return parseLLMResponse(response, patterns)
+}
+
+func buildAnalysisPrompt(patterns []PatternInput) string {
+	var sb strings.Builder
+
+	sb.WriteString(`You are analyzing shell command patterns to suggest aliases and functions.
+
+PATTERNS FOUND:
+`)
+
+	for _, p := range patterns {
+		sb.WriteString(fmt.Sprintf("- %q (used %d times, type: %s)\n", p.Command, p.Count, p.Type))
+	}
+
+	sb.WriteString(`
+YOUR TASK:
+For each pattern that would benefit from an alias or function, provide a suggestion.
+
+RULES:
+1. If a command has variable parts (like port numbers, file paths), make it a FUNCTION with parameters
+2. If a command is always the same, make it an ALIAS
+3. Choose short, memorable names (2-8 chars)
+4. For functions, show usage with example arguments
+5. Confidence: "high" if used 20+ times, "medium" if 10+, "low" otherwise
+6. Consolidate similar patterns (e.g., all "lsof -ti:XXXX | xargs kill" become one function)
+7. Skip patterns that are already short or wouldn't benefit much
+
+OUTPUT FORMAT (JSON array):
+[
+  {
+    "name": "kp",
+    "type": "function",
+    "usage": "kp 8080",
+    "code": "kp() {\n  lsof -ti:\"$1\" | xargs kill -9\n}",
+    "description": "Kill process on port",
+    "confidence": "high",
+    "pattern": "lsof -ti:8080 | xargs kill -9"
+  },
+  {
+    "name": "gob",
+    "type": "alias",
+    "usage": "gob",
+    "code": "alias gob='go build -o api . && ./api --server'",
+    "description": "Build and run Go API",
+    "confidence": "high",
+    "pattern": "go build -o api . && ./api --server"
+  }
+]
+
+Only output the JSON array, nothing else.
+`)
+
+	return sb.String()
+}
+
+func parseLLMResponse(response string, patterns []PatternInput) []Suggestion {
+	// Find JSON array in response
+	start := strings.Index(response, "[")
+	end := strings.LastIndex(response, "]")
+
+	if start == -1 || end == -1 || end <= start {
+		return nil
+	}
+
+	jsonStr := response[start : end+1]
+
+	var llmSuggestions []LLMSuggestion
+	if err := json.Unmarshal([]byte(jsonStr), &llmSuggestions); err != nil {
+		return nil
+	}
+
+	// Convert to our Suggestion type
+	var suggestions []Suggestion
+	patternCounts := make(map[string]int)
+	for _, p := range patterns {
+		patternCounts[p.Command] = p.Count
+	}
+
+	for _, ls := range llmSuggestions {
+		sugType := TypeAlias
+		if ls.Type == "function" {
+			sugType = TypeFunction
+		}
+
+		conf := ConfMedium
+		switch ls.Confidence {
+		case "high":
+			conf = ConfHigh
+		case "low":
+			conf = ConfLow
+		}
+
+		impact := patternCounts[ls.Pattern]
+		if impact == 0 {
+			// Try to find a matching pattern
+			for cmd, count := range patternCounts {
+				if strings.Contains(cmd, ls.Pattern) || strings.Contains(ls.Pattern, cmd) {
+					impact = count
+					break
+				}
+			}
+		}
+
+		suggestions = append(suggestions, Suggestion{
+			Type:        sugType,
+			Name:        ls.Name,
+			Usage:       ls.Usage,
+			Command:     ls.Pattern,
+			Code:        ls.Code,
+			Description: ls.Description,
+			Impact:      impact,
+			Confidence:  conf,
+		})
+	}
+
+	return suggestions
+}
+
+func createSimpleSuggestion(cmd string, count int) *Suggestion {
+	// Very basic heuristic fallback
+	name := generateSimpleName(cmd)
 	if name == "" {
 		return nil
 	}
 
-	// Escape single quotes in command
 	escaped := strings.ReplaceAll(cmd, "'", "'\\''")
 
-	conf := ConfMedium
+	conf := ConfLow
 	if count >= 20 {
 		conf = ConfHigh
-	} else if count < 5 {
-		conf = ConfLow
-	}
-
-	return &Suggestion{
-		Type:        TypeAlias,
-		Name:        name,
-		Command:     cmd,
-		Code:        fmt.Sprintf("alias %s='%s'", name, escaped),
-		Description: fmt.Sprintf("Typed %d times", count),
-		Impact:      count,
-		Confidence:  conf,
-	}
-}
-
-func createFunctionSuggestion(cmd string, count int) *Suggestion {
-	// Detect pwd | pbcopy pattern
-	if strings.TrimSpace(cmd) == "pwd | pbcopy" {
-		return &Suggestion{
-			Type:        TypeAlias,
-			Name:        "cpwd",
-			Command:     cmd,
-			Code:        "alias cpwd='pwd | pbcopy'",
-			Description: fmt.Sprintf("Copy current path to clipboard - used %d times", count),
-			Impact:      count,
-			Confidence:  ConfHigh,
-		}
-	}
-
-	// Generic pipeline - lower confidence
-	name := suggestFunctionName(cmd)
-	if name == "" {
-		return nil
-	}
-
-	conf := ConfLow
-	if count >= 10 {
+	} else if count >= 10 {
 		conf = ConfMedium
 	}
 
-	escaped := strings.ReplaceAll(cmd, "'", "'\\''")
 	return &Suggestion{
 		Type:        TypeAlias,
 		Name:        name,
+		Usage:       name,
 		Command:     cmd,
 		Code:        fmt.Sprintf("alias %s='%s'", name, escaped),
-		Description: fmt.Sprintf("Pipeline used %d times", count),
+		Description: fmt.Sprintf("Used %d times", count),
 		Impact:      count,
 		Confidence:  conf,
 	}
 }
 
-func createSequenceSuggestion(seq analyzer.SequenceCount) *Suggestion {
-	// cd -> ls/l pattern
-	if seq.From == "cd" && (seq.To == "l" || seq.To == "ls") {
-		return &Suggestion{
-			Type:    TypeFunction,
-			Name:    "cl",
-			Command: fmt.Sprintf("%s → %s", seq.From, seq.To),
-			Code: `cl() {
-    cd "$@" && l
-}`,
-			Description: fmt.Sprintf("cd then list - done %d times", seq.Count),
-			Impact:      seq.Count,
-			Confidence:  ConfHigh,
+func generateSimpleName(cmd string) string {
+	// Remove pipe and redirect operators for cleaner parsing
+	clean := cmd
+	clean = strings.ReplaceAll(clean, "|", " ")
+	clean = strings.ReplaceAll(clean, ">", " ")
+	clean = strings.ReplaceAll(clean, "<", " ")
+	clean = strings.ReplaceAll(clean, "&", " ")
+	clean = strings.ReplaceAll(clean, ";", " ")
+
+	words := strings.Fields(clean)
+	if len(words) == 0 {
+		return ""
+	}
+
+	// Take first letter of first 2-3 significant words (commands, not flags/paths)
+	name := ""
+	for _, w := range words {
+		if len(w) == 0 {
+			continue
+		}
+		// Skip flags, paths, numbers, and special chars
+		if w[0] == '-' || w[0] == '.' || w[0] == '/' || w[0] == '$' ||
+			(w[0] >= '0' && w[0] <= '9') {
+			continue
+		}
+		// Skip common shell words
+		if w == "xargs" || w == "grep" || w == "awk" || w == "sed" {
+			continue
+		}
+		name += string(w[0])
+		if len(name) >= 3 {
+			break
 		}
 	}
 
-	return nil
-}
-
-func suggestAliasName(cmd string) string {
-	cmd = strings.TrimSpace(cmd)
-
-	// go build patterns
-	if strings.HasPrefix(cmd, "go build") && strings.Contains(cmd, "./") {
-		return "gobuild"
+	if len(name) < 2 {
+		return ""
 	}
 
-	// App launchers
-	if strings.Contains(cmd, ".app/Contents/MacOS/") {
-		// Extract app name
-		parts := strings.Split(cmd, "/")
-		for _, p := range parts {
-			if strings.HasSuffix(p, ".app") {
-				name := strings.TrimSuffix(p, ".app")
-				return strings.ToLower(name[:min(6, len(name))])
-			}
-		}
-	}
-
-	// pip install -r requirements.txt
-	if strings.Contains(cmd, "pip install -r requirements") {
-		return "pipreq"
-	}
-
-	// open ./build/*.app
-	if strings.HasPrefix(cmd, "open ") && strings.Contains(cmd, ".app") {
-		parts := strings.Split(cmd, "/")
-		for _, p := range parts {
-			if strings.HasSuffix(p, ".app") {
-				name := strings.TrimSuffix(p, ".app")
-				return "open" + strings.ToLower(name[:min(4, len(name))])
-			}
-		}
-	}
-
-	// ssh commands
-	if strings.HasPrefix(cmd, "ssh ") {
-		parts := strings.Fields(cmd)
-		if len(parts) >= 2 {
-			// Extract hostname
-			host := parts[1]
-			if strings.Contains(host, "@") {
-				host = strings.Split(host, "@")[1]
-			}
-			host = strings.Split(host, ".")[0]
-			if len(host) > 8 {
-				host = host[:8]
-			}
-			return "ssh" + host
-		}
-	}
-
-	// Generic: use first few chars of significant words
-	words := strings.Fields(cmd)
-	if len(words) >= 2 {
-		name := ""
-		for _, w := range words[:min(3, len(words))] {
-			w = strings.TrimPrefix(w, "./")
-			w = strings.TrimPrefix(w, "-")
-			w = filepath.Base(w)
-			if len(w) > 0 && w[0] != '-' {
-				name += string(w[0])
-			}
-		}
-		if len(name) >= 2 {
-			return strings.ToLower(name)
-		}
-	}
-
-	return ""
-}
-
-func suggestFunctionName(cmd string) string {
-	// Very simple - just return empty for now, let user name it
-	return ""
+	return strings.ToLower(name)
 }
 
 func generateTips(analysis *analyzer.Analysis) []Suggestion {

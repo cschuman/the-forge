@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"forge-habits/analyzer"
+	"forge-habits/llm"
 	"forge-habits/parser"
 	"forge-habits/shell"
 	"forge-habits/suggestions"
@@ -38,6 +39,8 @@ func main() {
 	shellType := flag.String("shell", "", "Shell type: zsh or bash (auto-detected if not specified)")
 	showVersion := flag.Bool("version", false, "Show version")
 	reportOnly := flag.Bool("report", false, "Just show report, no interactive prompts")
+	noLLM := flag.Bool("no-llm", false, "Skip LLM analysis, use heuristics only")
+	model := flag.String("model", "kimi-k2-thinking:cloud", "Ollama model to use")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, `forge-habits - Analyze shell history and forge better workflows
@@ -52,6 +55,7 @@ Flags:
 Examples:
   forge-habits                    # Interactive analysis
   forge-habits --report           # Just show the report
+  forge-habits --no-llm           # Skip LLM, use heuristics only
 `)
 	}
 
@@ -78,7 +82,20 @@ Examples:
 	analysis := analyzer.Analyze(historyData)
 
 	// Generate actionable suggestions
-	suggestionSet := suggestions.Generate(analysis)
+	var suggestionSet *suggestions.SuggestionSet
+	if *noLLM {
+		printInfo("Using heuristics (LLM disabled)")
+		suggestionSet = suggestions.GenerateWithoutLLM(analysis)
+	} else {
+		client := llm.NewClient(*model)
+		if !client.IsAvailable() {
+			printInfo("Ollama not available, using heuristics")
+			suggestionSet = suggestions.GenerateWithoutLLM(analysis)
+		} else {
+			printInfo(fmt.Sprintf("Consulting the oracle (%s)...", *model))
+			suggestionSet = suggestions.Generate(analysis, client)
+		}
+	}
 
 	// Show header
 	printHeader()
@@ -140,14 +157,12 @@ func runInteractive(analysis *analyzer.Analysis, set *suggestions.SuggestionSet)
 
 		for i, s := range highImpact {
 			typeLabel := "alias"
-			usage := s.Name
 			if s.Type == suggestions.TypeFunction {
 				typeLabel = "function"
-				usage = getFunctionUsage(s.Name)
 			}
 
 			fmt.Printf("  %s[%d]%s %s%s%s %s(%s)%s\n", Cyan, i+1, Reset, Bold, s.Name, Reset, Dim, typeLabel, Reset)
-			fmt.Printf("      %sUsage:%s %s\n", Dim, Reset, usage)
+			fmt.Printf("      %sUsage:%s %s\n", Dim, Reset, s.Usage)
 			fmt.Printf("      %s%s%s\n\n", Dim, s.Description, Reset)
 		}
 
@@ -305,13 +320,3 @@ func truncate(s string, max int) string {
 	return s[:max-3] + "..."
 }
 
-func getFunctionUsage(name string) string {
-	switch name {
-	case "killport":
-		return "killport 8080"
-	case "cl":
-		return "cl ~/Projects"
-	default:
-		return name + " <args>"
-	}
-}

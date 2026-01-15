@@ -37,9 +37,11 @@ func NewClient(model string) *OllamaClient {
 	}
 }
 
-func (c *OllamaClient) GetRecommendations(analysis *analyzer.Analysis) (string, error) {
-	prompt := buildPrompt(analysis)
+// Client is the interface for LLM operations
+type Client = OllamaClient
 
+// Generate sends a prompt to the LLM and returns the response
+func (c *OllamaClient) Generate(prompt string) (string, error) {
 	reqBody := generateRequest{
 		Model:  c.Model,
 		Prompt: prompt,
@@ -69,6 +71,22 @@ func (c *OllamaClient) GetRecommendations(analysis *analyzer.Analysis) (string, 
 	}
 
 	return result.Response, nil
+}
+
+func (c *OllamaClient) GetRecommendations(analysis *analyzer.Analysis) (string, error) {
+	prompt := buildPrompt(analysis)
+	return c.Generate(prompt)
+}
+
+// IsAvailable checks if Ollama is running and accessible
+func (c *OllamaClient) IsAvailable() bool {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(c.BaseURL + "/api/tags")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
 }
 
 func buildPrompt(analysis *analyzer.Analysis) string {
