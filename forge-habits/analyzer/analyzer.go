@@ -34,12 +34,21 @@ type Typo struct {
 	Count    int
 }
 
-// Common commands for typo detection
+// Common commands for typo detection (as slice for Levenshtein comparison)
 var commonCommands = []string{
 	"git", "cd", "ls", "npm", "yarn", "pnpm", "clear", "cat", "grep", "find",
 	"sudo", "brew", "open", "mkdir", "touch", "rm", "cp", "mv", "code",
 	"docker", "kubectl", "go", "python", "python3", "pip", "node", "ssh",
 	"curl", "wget", "vim", "nvim", "nano", "echo", "source", "export",
+}
+
+// Common commands as a map for O(1) lookup
+var commonCommandsMap = make(map[string]bool)
+
+func init() {
+	for _, cmd := range commonCommands {
+		commonCommandsMap[cmd] = true
+	}
 }
 
 // Known valid commands that might look like typos
@@ -174,24 +183,17 @@ func detectTypos(cmdCounts map[string]int) []Typo {
 			continue
 		}
 
-		// Skip if it's a known valid command
+		// Skip if it's a known valid command (O(1) lookup)
 		if knownValidCommands[typed] {
 			continue
 		}
 
-		// Skip if it's a valid common command
-		isCommon := false
-		for _, common := range commonCommands {
-			if typed == common {
-				isCommon = true
-				break
-			}
-		}
-		if isCommon {
+		// Skip if it's a valid common command (O(1) lookup instead of O(n))
+		if commonCommandsMap[typed] {
 			continue
 		}
 
-		// Check against common commands
+		// Check against common commands for typos
 		for _, common := range commonCommands {
 			dist := levenshtein(typed, common)
 			maxDist := max(1, len(common)/3)
@@ -218,7 +220,8 @@ func detectTypos(cmdCounts map[string]int) []Typo {
 	return typos
 }
 
-// Simple Levenshtein distance implementation
+// Optimized Levenshtein distance implementation
+// Uses O(min(n,m)) space instead of O(n*m) by only keeping two rows
 func levenshtein(a, b string) int {
 	if len(a) == 0 {
 		return len(b)
@@ -227,27 +230,37 @@ func levenshtein(a, b string) int {
 		return len(a)
 	}
 
-	matrix := make([][]int, len(a)+1)
-	for i := range matrix {
-		matrix[i] = make([]int, len(b)+1)
-		matrix[i][0] = i
-	}
-	for j := range matrix[0] {
-		matrix[0][j] = j
+	// Make 'a' the shorter string to minimize space usage
+	if len(a) > len(b) {
+		a, b = b, a
 	}
 
-	for i := 1; i <= len(a); i++ {
-		for j := 1; j <= len(b); j++ {
+	// Only need two rows: previous and current
+	prev := make([]int, len(a)+1)
+	curr := make([]int, len(a)+1)
+
+	// Initialize first row
+	for i := range prev {
+		prev[i] = i
+	}
+
+	// Fill in the rest
+	for j := 1; j <= len(b); j++ {
+		curr[0] = j
+		for i := 1; i <= len(a); i++ {
 			cost := 1
 			if a[i-1] == b[j-1] {
 				cost = 0
 			}
-			matrix[i][j] = min(
-				matrix[i-1][j]+1,
-				min(matrix[i][j-1]+1, matrix[i-1][j-1]+cost),
+			curr[i] = min(
+				prev[i]+1,          // deletion
+				min(curr[i-1]+1,    // insertion
+					prev[i-1]+cost), // substitution
 			)
 		}
+		// Swap rows
+		prev, curr = curr, prev
 	}
 
-	return matrix[len(a)][len(b)]
+	return prev[len(a)]
 }

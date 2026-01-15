@@ -137,8 +137,18 @@ func AddToRC(rcPath string, entries []string) error {
 		finalContent = existingContent + newSection.String()
 	}
 
-	// Write back
-	return os.WriteFile(rcPath, []byte(finalContent), 0644)
+	// Preserve original permissions if file exists, otherwise use secure default
+	var fileMode os.FileMode = 0600 // Secure default: owner read/write only
+	if info, err := os.Stat(rcPath); err == nil {
+		fileMode = info.Mode()
+		// Warn if permissions are too permissive
+		if fileMode&0077 != 0 {
+			fmt.Fprintf(os.Stderr, "Warning: %s has permissive permissions (%o). Consider chmod 600.\n", rcPath, fileMode)
+		}
+	}
+
+	// Write back with secure permissions
+	return os.WriteFile(rcPath, []byte(finalContent), fileMode)
 }
 
 func extractForgeEntries(section string) []string {
@@ -189,12 +199,24 @@ func Backup(rcPath string) (string, error) {
 		if os.IsNotExist(err) {
 			return "", nil // No file to backup
 		}
-		return "", err
+		return "", fmt.Errorf("failed to read source file: %w", err)
 	}
 
-	err = os.WriteFile(backupPath, data, 0644)
+	// Write backup with secure permissions (owner read/write only)
+	if err := os.WriteFile(backupPath, data, 0600); err != nil {
+		return "", fmt.Errorf("failed to write backup: %w", err)
+	}
+
+	// Verify backup integrity
+	backupData, err := os.ReadFile(backupPath)
 	if err != nil {
-		return "", err
+		os.Remove(backupPath)
+		return "", fmt.Errorf("failed to verify backup: %w", err)
+	}
+
+	if len(data) != len(backupData) {
+		os.Remove(backupPath)
+		return "", fmt.Errorf("backup verification failed: size mismatch")
 	}
 
 	return backupPath, nil

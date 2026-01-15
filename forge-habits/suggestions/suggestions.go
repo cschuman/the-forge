@@ -3,6 +3,7 @@ package suggestions
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 
 	"forge-habits/analyzer"
@@ -47,7 +48,7 @@ type SuggestionSet struct {
 }
 
 // Generate creates actionable suggestions from analysis using LLM
-func Generate(analysis *analyzer.Analysis, client *llm.Client) *SuggestionSet {
+func Generate(analysis *analyzer.Analysis, client llm.Client) *SuggestionSet {
 	set := &SuggestionSet{}
 
 	// Collect patterns worth analyzing
@@ -169,16 +170,21 @@ type LLMSuggestion struct {
 	Pattern     string `json:"pattern"`    // which input pattern this addresses
 }
 
-func analyzePatternsWithLLM(patterns []PatternInput, client *llm.Client) []Suggestion {
+func analyzePatternsWithLLM(patterns []PatternInput, client llm.Client) []Suggestion {
 	prompt := buildAnalysisPrompt(patterns)
 
 	response, err := client.Generate(prompt)
 	if err != nil {
-		// Fall back to simple heuristics
+		log.Printf("LLM analysis failed: %v", err)
 		return nil
 	}
 
-	return parseLLMResponse(response, patterns)
+	suggestions := parseLLMResponse(response, patterns)
+	if len(suggestions) == 0 && response != "" {
+		log.Printf("LLM returned response but no valid suggestions were extracted")
+	}
+
+	return suggestions
 }
 
 func buildAnalysisPrompt(patterns []PatternInput) string {
@@ -235,11 +241,28 @@ Only output the JSON array, nothing else.
 }
 
 func parseLLMResponse(response string, patterns []PatternInput) []Suggestion {
-	// Find JSON array in response
-	start := strings.Index(response, "[")
-	end := strings.LastIndex(response, "]")
+	// Find JSON array in response using balanced bracket matching
+	start := -1
+	depth := 0
+	end := -1
 
-	if start == -1 || end == -1 || end <= start {
+	for i, ch := range response {
+		if ch == '[' {
+			if depth == 0 {
+				start = i
+			}
+			depth++
+		} else if ch == ']' {
+			depth--
+			if depth == 0 && start != -1 {
+				end = i
+				break
+			}
+		}
+	}
+
+	if start == -1 || end == -1 {
+		log.Printf("No valid JSON array found in LLM response")
 		return nil
 	}
 
@@ -247,10 +270,11 @@ func parseLLMResponse(response string, patterns []PatternInput) []Suggestion {
 
 	var llmSuggestions []LLMSuggestion
 	if err := json.Unmarshal([]byte(jsonStr), &llmSuggestions); err != nil {
+		log.Printf("Failed to parse LLM JSON response: %v", err)
 		return nil
 	}
 
-	// Convert to our Suggestion type
+	// Convert to our Suggestion type, validating each one
 	var suggestions []Suggestion
 	patternCounts := make(map[string]int)
 	for _, p := range patterns {
@@ -258,6 +282,12 @@ func parseLLMResponse(response string, patterns []PatternInput) []Suggestion {
 	}
 
 	for _, ls := range llmSuggestions {
+		// Validate the suggestion for security
+		if err := ValidateSuggestion(&ls); err != nil {
+			log.Printf("Rejected unsafe LLM suggestion %q: %v", ls.Name, err)
+			continue
+		}
+
 		sugType := TypeAlias
 		if ls.Type == "function" {
 			sugType = TypeFunction
@@ -298,6 +328,11 @@ func parseLLMResponse(response string, patterns []PatternInput) []Suggestion {
 }
 
 func createSimpleSuggestion(cmd string, count int) *Suggestion {
+	// Reject commands with dangerous patterns
+	if containsDangerousPatterns(cmd) {
+		return nil
+	}
+
 	// Very basic heuristic fallback
 	name := generateSimpleName(cmd)
 	if name == "" {
@@ -305,6 +340,18 @@ func createSimpleSuggestion(cmd string, count int) *Suggestion {
 	}
 
 	escaped := strings.ReplaceAll(cmd, "'", "'\\''")
+	code := fmt.Sprintf("alias %s='%s'", name, escaped)
+
+	// Validate the generated code
+	llmSug := &LLMSuggestion{
+		Name: name,
+		Type: "alias",
+		Code: code,
+	}
+	if err := ValidateSuggestion(llmSug); err != nil {
+		log.Printf("Rejected heuristic suggestion %q: %v", name, err)
+		return nil
+	}
 
 	conf := ConfLow
 	if count >= 20 {
@@ -318,11 +365,27 @@ func createSimpleSuggestion(cmd string, count int) *Suggestion {
 		Name:        name,
 		Usage:       name,
 		Command:     cmd,
-		Code:        fmt.Sprintf("alias %s='%s'", name, escaped),
+		Code:        code,
 		Description: fmt.Sprintf("Used %d times", count),
 		Impact:      count,
 		Confidence:  conf,
 	}
+}
+
+// containsDangerousPatterns checks if a command contains patterns that shouldn't be aliased
+func containsDangerousPatterns(cmd string) bool {
+	dangerous := []string{
+		"; bash", "; sh", "| bash", "| sh",
+		"eval ", "base64 -d", "/dev/tcp",
+		"curl | ", "wget | ", "$(curl", "$(wget",
+	}
+	cmdLower := strings.ToLower(cmd)
+	for _, d := range dangerous {
+		if strings.Contains(cmdLower, d) {
+			return true
+		}
+	}
+	return false
 }
 
 func generateSimpleName(cmd string) string {

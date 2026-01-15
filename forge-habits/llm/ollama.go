@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -38,9 +39,16 @@ func NewClient(model string) *OllamaClient {
 }
 
 // Client is the interface for LLM operations
-type Client = OllamaClient
+type Client interface {
+	Generate(prompt string) (string, error)
+	IsAvailable() bool
+}
+
+// Ensure OllamaClient implements Client
+var _ Client = (*OllamaClient)(nil)
 
 // Generate sends a prompt to the LLM and returns the response
+// Includes retry logic with exponential backoff for transient failures
 func (c *OllamaClient) Generate(prompt string) (string, error) {
 	reqBody := generateRequest{
 		Model:  c.Model,
@@ -53,24 +61,54 @@ func (c *OllamaClient) Generate(prompt string) (string, error) {
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
+	// Retry with exponential backoff
+	maxRetries := 3
+	backoff := 1 * time.Second
+	var lastErr error
+
 	client := &http.Client{Timeout: c.Timeout}
-	resp, err := client.Post(c.BaseURL+"/api/generate", "application/json", bytes.NewBuffer(jsonBody))
-	if err != nil {
-		return "", fmt.Errorf("failed to call Ollama: %w", err)
-	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("Ollama returned status %d: %s", resp.StatusCode, string(body))
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			log.Printf("Retrying LLM request (attempt %d/%d) after %v", attempt+1, maxRetries, backoff)
+			time.Sleep(backoff)
+			backoff *= 2 // Exponential backoff
+		}
+
+		resp, err := client.Post(c.BaseURL+"/api/generate", "application/json", bytes.NewBuffer(jsonBody))
+		if err != nil {
+			lastErr = fmt.Errorf("failed to call Ollama: %w", err)
+			continue
+		}
+
+		// Read and close body properly
+		body, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if readErr != nil {
+			lastErr = fmt.Errorf("failed to read response body: %w", readErr)
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("Ollama returned status %d: %s", resp.StatusCode, string(body))
+			// Don't retry on 4xx errors (client errors)
+			if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+				return "", lastErr
+			}
+			continue
+		}
+
+		var result generateResponse
+		if err := json.Unmarshal(body, &result); err != nil {
+			lastErr = fmt.Errorf("failed to decode response: %w", err)
+			continue
+		}
+
+		return result.Response, nil
 	}
 
-	var result generateResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	return result.Response, nil
+	return "", fmt.Errorf("LLM request failed after %d attempts: %w", maxRetries, lastErr)
 }
 
 func (c *OllamaClient) GetRecommendations(analysis *analyzer.Analysis) (string, error) {
@@ -83,10 +121,15 @@ func (c *OllamaClient) IsAvailable() bool {
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get(c.BaseURL + "/api/tags")
 	if err != nil {
+		log.Printf("Ollama not available: %v", err)
 		return false
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Ollama returned unexpected status: %d", resp.StatusCode)
+		return false
+	}
+	return true
 }
 
 func buildPrompt(analysis *analyzer.Analysis) string {
@@ -100,7 +143,7 @@ func buildPrompt(analysis *analyzer.Analysis) string {
 
 	sb.WriteString(fmt.Sprintf("**Total commands:** %d\n\n", analysis.TotalCommands))
 
-	// Top commands
+	// Top commands (these are just command names, not full commands, so less risk)
 	sb.WriteString("### Most Used Commands\n")
 	for i, cmd := range analysis.TopCommands {
 		if i >= 10 {
@@ -109,14 +152,15 @@ func buildPrompt(analysis *analyzer.Analysis) string {
 		sb.WriteString(fmt.Sprintf("- `%s`: %d times\n", cmd.Command, cmd.Count))
 	}
 
-	// Alias candidates
+	// Alias candidates - sanitize these as they contain full commands
 	if len(analysis.AliasCandidates) > 0 {
 		sb.WriteString("\n### Long Commands (Alias Candidates)\n")
 		for i, cmd := range analysis.AliasCandidates {
 			if i >= 8 {
 				break
 			}
-			display := cmd.Command
+			// Sanitize sensitive data
+			display := SanitizeCommand(cmd.Command)
 			if len(display) > 60 {
 				display = display[:60] + "..."
 			}
@@ -124,14 +168,15 @@ func buildPrompt(analysis *analyzer.Analysis) string {
 		}
 	}
 
-	// Pipeline commands
+	// Pipeline commands - sanitize these too
 	if len(analysis.PipelineCommands) > 0 {
 		sb.WriteString("\n### Repeated Pipelines (Script Candidates)\n")
 		for i, cmd := range analysis.PipelineCommands {
 			if i >= 5 {
 				break
 			}
-			display := cmd.Command
+			// Sanitize sensitive data
+			display := SanitizeCommand(cmd.Command)
 			if len(display) > 60 {
 				display = display[:60] + "..."
 			}

@@ -13,17 +13,7 @@ import (
 	"forge-habits/parser"
 	"forge-habits/shell"
 	"forge-habits/suggestions"
-)
-
-// ANSI colors
-const (
-	Reset   = "\033[0m"
-	Bold    = "\033[1m"
-	Dim     = "\033[2m"
-	Cyan    = "\033[36m"
-	Green   = "\033[32m"
-	Yellow  = "\033[33m"
-	Red     = "\033[31m"
+	. "forge-habits/ui" // Import colors into current namespace
 )
 
 var (
@@ -131,7 +121,10 @@ func runInteractive(analysis *analyzer.Analysis, set *suggestions.SuggestionSet)
 	// Filter out suggestions that already exist
 	var highImpact []suggestions.Suggestion
 	for _, s := range set.HighImpact {
-		exists, _ := shell.HasAlias(rcPath, s.Name)
+		exists, err := shell.HasAlias(rcPath, s.Name)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%sWarning: Could not check if %s exists: %v%s\n", Yellow, s.Name, err, Reset)
+		}
 		if !exists {
 			highImpact = append(highImpact, s)
 		}
@@ -139,7 +132,10 @@ func runInteractive(analysis *analyzer.Analysis, set *suggestions.SuggestionSet)
 
 	var review []suggestions.Suggestion
 	for _, s := range set.Review {
-		exists, _ := shell.HasAlias(rcPath, s.Name)
+		exists, err := shell.HasAlias(rcPath, s.Name)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%sWarning: Could not check if %s exists: %v%s\n", Yellow, s.Name, err, Reset)
+		}
 		if !exists {
 			review = append(review, s)
 		}
@@ -176,13 +172,24 @@ func runInteractive(analysis *analyzer.Analysis, set *suggestions.SuggestionSet)
 			}
 
 			// Backup first
-			backupPath, _ := shell.Backup(rcPath)
-			if backupPath != "" {
+			backupPath, backupErr := shell.Backup(rcPath)
+			if backupErr != nil {
+				fmt.Printf("%sWarning: Could not create backup: %v%s\n", Yellow, backupErr, Reset)
+				fmt.Printf("Continue without backup? %s[y/N]%s ", Dim, Reset)
+				confirm := readLine()
+				if strings.ToLower(confirm) != "y" && strings.ToLower(confirm) != "yes" {
+					fmt.Printf("%sCancelled. Your RC file was not modified.%s\n", Dim, Reset)
+					return
+				}
+			} else if backupPath != "" {
 				printInfo(fmt.Sprintf("Backed up to %s", backupPath))
 			}
 
 			if err := shell.AddToRC(rcPath, toAdd); err != nil {
 				fmt.Printf("%sError writing to %s: %v%s\n", Red, rcPath, err, Reset)
+				if backupPath != "" {
+					fmt.Printf("%sYou can restore from: %s%s\n", Yellow, backupPath, Reset)
+				}
 			} else {
 				fmt.Printf("\n%s✓ Forged %d improvements into %s%s\n", Green, len(toAdd), rcPath, Reset)
 				fmt.Printf("%sRun 'source %s' or open a new terminal to use them.%s\n", Dim, rcPath, Reset)
