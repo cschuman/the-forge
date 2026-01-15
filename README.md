@@ -1,75 +1,75 @@
 # The Forge ⚒
 
-Adaptive system optimization tools that read the room.
+Tools that read the room, then swing the hammer.
 
-The Forge is a collection of CLI utilities that help you optimize your system—cleaning disk space, analyzing habits, and more. What makes it different: **it adapts to you**. Instead of dumping reports and walking away, The Forge assesses confidence and risk, then chooses how to interact: auto-executing safe cleanups, guiding you through uncertain decisions, or stepping back when you know best.
+Most CLI tools dump ore at your feet and walk away. The Forge heats the metal, examines the grain, and helps you strike. It assesses confidence and risk, then adapts—auto-executing when the path is clear, guiding you through uncertain terrain, or stepping back when you know the craft better.
 
-## Tools
+## The Workshop
 
 ### `forge dust`
-Disk space analyzer that finds cache directories, large files, old downloads, and forgotten clutter.
+Smelts away disk clutter. Finds cache slag, oversized ingots, forgotten downloads, and rusted files.
 
 ```bash
-forge dust              # Scan home directory
-forge dust --quick      # Fast scan, skip hidden dirs
-forge dust --no-llm     # Skip AI recommendations
+forge dust              # Survey the home directory
+forge dust --quick      # Quick pass, skip the deep corners
+forge dust --no-llm     # Work without the oracle
 ```
 
 ### `forge habits`
-Shell history analyzer that finds repetitive commands, suggests aliases, and spots workflow inefficiencies.
+Examines your workflow at the anvil. Spots repetitive hammer strikes, suggests better techniques, then offers to temper them into your shell.
 
 ```bash
-forge habits            # Analyze shell history
-forge habits --no-llm   # Skip AI recommendations
+forge habits            # Analyze and offer to forge improvements
+forge habits --report   # Just show the ore, don't swing
 ```
 
-## The Adaptive Philosophy
+## The Smith's Philosophy
 
-Most tools blast you with information and leave. The Forge reads the room:
+Most tools blast you with information and leave you holding raw metal. The Forge reads the room:
 
-| Confidence | Risk | Behavior |
-|------------|------|----------|
-| High | Low | Auto-execute (burn off the slag) |
-| High | Medium | Suggest with Y/n confirmation |
-| Medium | Medium | Guide through each category |
-| Low | High | Discuss before touching anything |
+| Confidence | Risk | The Smith's Approach |
+|------------|------|----------------------|
+| High | Low | Strikes immediately (burns off the slag) |
+| High | Medium | Shows the plan, awaits your nod |
+| Medium | Medium | Walks you through each piece |
+| Low | High | Discusses before touching the metal |
 
-Over time, The Forge learns your preferences. Always skip `.mov` files? It remembers. Always delete `node_modules`? It'll stop asking.
+The Forge learns your preferences over time. Always skip `.mov` files? It remembers. Always melt down `node_modules`? It stops asking.
 
 ```bash
-forge always "*.dmg"    # Always auto-delete DMG files
-forge never "*.mov"     # Never suggest deleting videos
-forge review            # See what's been learned
-forge reset             # Start fresh
+forge always "*.dmg"    # Always burn these down
+forge never "*.mov"     # Never suggest these for the crucible
+forge review            # See what the forge has learned
+forge reset             # Cool the metal, start fresh
 ```
 
-## Installation
+## Firing Up the Forge
 
-Requires Go 1.21+ and [Ollama](https://ollama.ai) for AI features.
+Requires Go 1.21+ and [Ollama](https://ollama.ai) for the oracle's wisdom.
 
 ```bash
-# Clone and build
+# Clone the workshop
 git clone https://github.com/cschuman/the-forge.git
 cd the-forge
 
-# Build all tools
+# Forge all tools
 (cd forge-dust && go build -o forge-dust .)
 (cd forge-habits && go build -o forge-habits .)
 (cd forge && go build -o forge .)
 
-# Symlink to your PATH
+# Hang them on your PATH
 ln -s $(pwd)/forge/forge ~/.local/bin/forge
 ln -s $(pwd)/forge-dust/forge-dust ~/.local/bin/forge-dust
 ln -s $(pwd)/forge-habits/forge-habits ~/.local/bin/forge-habits
 ```
 
-## Design
+## The Blueprints
 
-See [FORGE_PHILOSOPHY.md](FORGE_PHILOSOPHY.md) for the adaptive interaction model and [LEARNING_SYSTEM.md](LEARNING_SYSTEM.md) for how the self-calibrating rules work.
+See [FORGE_PHILOSOPHY.md](FORGE_PHILOSOPHY.md) for the adaptive tempering model and [LEARNING_SYSTEM.md](LEARNING_SYSTEM.md) for how the self-calibrating bellows work.
 
 ## Status
 
-Early development. The forge is hot, but the metal's still being shaped.
+The forge is hot. The metal's taking shape. More tools warming in the coals.
 
 ---
 
