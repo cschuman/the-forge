@@ -1,0 +1,14 @@
+# Binaries
+forge/forge
+forge-dust/forge-dust
+forge-habits/forge-habits
+
+# OS files
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+
+# Local data
+*.log
